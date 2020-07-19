@@ -235,6 +235,51 @@ class Interp(Jsonable):
 
         return rep
 
+    def solve_xor_for_evts(self, name, key_name, onto_prefix, component_rank_map, group_level):
+        # =====
+        def _sort_key(_p):
+            _v = _p[-1]  # (key,value)[-1]
+            _comp, _score = _v.get('component', None), _v.get('score', None)  # smaller for rank, larger for score
+            if _comp is None:
+                _comp = "unk"
+            if _score is None:
+                _score = -999.
+            _comp = _comp.split(".")[0].lower()  # check by first name
+            return (component_rank_map.get(_comp, 999), -_score)
+        # =====
+        # eliminate some unnecessary XORs for event types
+        keyed_content = self.__fields[name][key_name]
+        if len(keyed_content)>1 and name in self.mutex_fields:  # we have XORs, try to solve
+            # first create groups by 1) whether in ontology, 2) type[:group_level]
+            groups = {}
+            hit_onto = False
+            for key, value in keyed_content.items():
+                one_full_type = value['content']
+                one_full_type_splits = one_full_type.split(":", 1)
+                if len(one_full_type_splits) == 2:
+                    one_onto_prefix, one_real_type = one_full_type_splits
+                else:  # not that format!
+                    one_onto_prefix, one_real_type = '', one_full_type
+                if one_onto_prefix == onto_prefix:  # hit ontology, get Leveled type as key
+                    group_key = '.'.join(one_real_type.split(".")[:group_level])  # group by certain level
+                    hit_onto = True
+                else:
+                    group_key = None
+                if group_key not in groups:
+                    groups[group_key] = []
+                groups[group_key].append((key, value))
+            # ignore types not in onto if there are in-onto ones
+            if hit_onto and None in groups:
+                del groups[None]
+                assert len(groups) > 0  # must >0
+            # sort inside group and assign
+            new_keyed_content = {}
+            for g in groups.values():
+                g.sort(key=_sort_key)
+                new_keyed_content[g[0][0]] = g[0][1]  # only assign the highest ranked one!
+            # replace!
+            keyed_content.clear()
+            keyed_content.update(new_keyed_content)
 
 class InterpFrame(Frame):
     """
@@ -642,12 +687,14 @@ class EventMention(SpanInterpFrame):
                    component=None):
         onto_type, event_type = full_type.split(":")
 
-        if component == self.component:
-            # Inherit frame component name.
-            component = None
+        # always input component type
+        # if component == self.component:
+        #     # Inherit frame component name.
+        #     component = None
 
         if full_type is not None:
-            self.interp.add_field('type', 'type', onto_type, full_type,
+            # allow multiple types here and resolve later by solve_xor
+            self.interp.add_field('type', 'type', full_type, full_type,
                                   score=score, component=component)
             # Allow multiple event types.
             self.event_type.add(full_type)
@@ -743,6 +790,11 @@ class EventMention(SpanInterpFrame):
                 'modifiers': self.modifiers,
             }
 
+            # add original trigger info
+            if 'provenance' in rep:
+                for _key in ["start", "length", "text"]:
+                    extent_provenance["trigger_"+_key] = rep['provenance'][_key]
+
             if self.keyframe:
                 extent_provenance['keyframe'] = self.keyframe
 
@@ -824,18 +876,19 @@ class CSR:
                 parent_sent = self._frame_map[self.sent_key][parent_sent_id]
                 return parent_sent
 
-        def compute_span(this_frame):
+        def compute_span(this_frame, span_prefix=""):
             parent_sent = get_parent_sent(this_frame)
             if parent_sent:
                 offset = parent_sent.span.begin
             else:
                 offset = 0
 
-            s = this_frame["provenance"]["start"] + offset
+            # try to read trigger info first then fallback to plain ones
+            s = this_frame["provenance"].get(span_prefix+"start", this_frame["provenance"]["start"]) + offset
             if ltf_span_style:
                 s = s - 1
 
-            e = this_frame["provenance"]["length"] + s
+            e = this_frame["provenance"].get(span_prefix+"length", this_frame["provenance"]["length"]) + s
             return (s, e)
 
         def handle_xor(group):
@@ -899,8 +952,9 @@ class CSR:
                 parent_sent = get_parent_sent(frame)
                 interp = frame['interp']
                 # onto, t = interp['type'].split(':')
-                text = frame["provenance"]['text']
-                span = compute_span(frame)
+                # text = frame["provenance"]['text']
+                text = frame["provenance"].get('trigger_text', frame["provenance"]['text'])
+                span = compute_span(frame, span_prefix="trigger_")
 
                 raw_type = interp.get("type", None)
 
@@ -1342,7 +1396,12 @@ class CSR:
                 full_evm_type = fix_event_type_from_entity(
                     full_evm_type, arg_entity_types
                 )
-            evm.add_interp(full_evm_type, realis, component=component)
+            # evm.add_interp(full_evm_type, realis, score=score, component=component)
+            evm.add_interp(full_evm_type, realis, component=component)  # no adding of score since may break some others
+            # =====
+            # eliminate some unnecessary XORs: currently group at L1!!
+            evm.interp.solve_xor_for_evts('type', 'type', self.ontology.prefix, {'comex':0, 'zie':1}, 1)
+            evm.interp.solve_xor_for_evts('realis', 'realis', None, {'comex':0, 'zie':1}, 1)
 
         return evm
 
