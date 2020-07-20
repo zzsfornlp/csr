@@ -790,15 +790,11 @@ class EventMention(SpanInterpFrame):
                 'modifiers': self.modifiers,
             }
 
-            # add original trigger info
-            if 'provenance' in rep:
-                for _key in ["start", "length", "text"]:
-                    extent_provenance["trigger_"+_key] = rep['provenance'][_key]
-
             if self.keyframe:
                 extent_provenance['keyframe'] = self.keyframe
 
-            rep['provenance'] = extent_provenance
+            if 'provenance' in rep:  # add another field instead of replacing
+                rep['provenance']['extent_provenance'] = extent_provenance
 
         return rep
 
@@ -876,19 +872,18 @@ class CSR:
                 parent_sent = self._frame_map[self.sent_key][parent_sent_id]
                 return parent_sent
 
-        def compute_span(this_frame, span_prefix=""):
+        def compute_span(this_frame):
             parent_sent = get_parent_sent(this_frame)
             if parent_sent:
                 offset = parent_sent.span.begin
             else:
                 offset = 0
 
-            # try to read trigger info first then fallback to plain ones
-            s = this_frame["provenance"].get(span_prefix+"start", this_frame["provenance"]["start"]) + offset
+            s = this_frame['provenance']["start"] + offset
             if ltf_span_style:
                 s = s - 1
 
-            e = this_frame["provenance"].get(span_prefix+"length", this_frame["provenance"]["length"]) + s
+            e = this_frame['provenance']["length"] + s
             return (s, e)
 
         def handle_xor(group):
@@ -952,9 +947,8 @@ class CSR:
                 parent_sent = get_parent_sent(frame)
                 interp = frame['interp']
                 # onto, t = interp['type'].split(':')
-                # text = frame["provenance"]['text']
-                text = frame["provenance"].get('trigger_text', frame["provenance"]['text'])
-                span = compute_span(frame, span_prefix="trigger_")
+                text = frame["provenance"]['text']
+                span = compute_span(frame)
 
                 raw_type = interp.get("type", None)
 
@@ -987,7 +981,14 @@ class CSR:
 
                 for mod, v in frame["provenance"]["modifiers"].items():
                     csr_evm.add_modifier(mod, v)
-                    
+
+                # add extent
+                if "extent_provenance" in frame["provenance"]:
+                    extent_provenance = frame["provenance"]["extent_provenance"]
+                    extent_span = Span(extent_provenance["reference"], extent_provenance["start"],
+                                       extent_provenance["length"], extent_provenance["text"])
+                    csr_evm.add_extent(extent_span)
+
                 frames_for_arg_adding.append((csr_evm, interp))
 
             for csr_evm, interp in frames_for_arg_adding:
